@@ -1,0 +1,270 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import '../models/student.dart';
+import '../services/api_service.dart';
+
+class StudentProvider with ChangeNotifier {
+  final ApiService _api = ApiService();
+
+  Student? _student;
+  String? _studentCode;
+  List<Discipline> _disciplines = [];
+  Map<DateTime, List<Lesson>> _timetable = {};
+  DateTime _selectedDate = DateTime.now();
+  int _selectedSubgroup = 1;
+  bool _isLoading = false;
+  String _loadingStatus = '';
+
+  Student? get student => _student;
+  String? get studentCode => _studentCode;
+  List<Discipline> get disciplines => _disciplines;
+  DateTime get selectedDate => _selectedDate;
+  int get selectedSubgroup => _selectedSubgroup;
+  bool get isLoading => _isLoading;
+  String get loadingStatus => _loadingStatus;
+
+  List<Lesson> get todayLessons {
+    final key = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
+    return _timetable[key] ?? [];
+  }
+
+  Future<void> loadStudentData() async {
+    _isLoading = true;
+    _loadingStatus = 'Загрузка данных пользователя...';
+    notifyListeners();
+
+    try {
+      // 1. Загружаем User
+      print('📥 Запрос User...');
+      final userResult = await _api.getUser();
+      print('📦 СЫРОЙ ОТВЕТ User: $userResult');
+      
+      if (userResult['success'] == true) {
+        print('📦 ПОЛНЫЙ JSON User:');
+        print(const JsonEncoder.withIndent('  ').convert(userResult['data']));
+        
+        final userData = userResult['data'];
+        final fio = userData['FIO'] ?? 'Студент';
+        final photo = userData['Photo'];
+        final photoUrl = photo != null 
+            ? (photo['UrlSource'] ?? photo['UrlMedium'] ?? photo['UrlSmall'] ?? '') 
+            : '';
+        
+        _student = Student(name: fio, group: '', faculty: '', photoUrl: photoUrl);
+        _studentCode = userData['StudentCod']?.toString();
+        print('✅ Использовал FIO: $fio');
+        print('📸 URL фото: $photoUrl');
+        print('🔑 StudentCod: $_studentCode');
+        print('📧 Email: ${userData['Email']}');
+        print('👤 UserName: ${userData['UserName']}');
+      }
+
+      // 2. Семестр
+      _loadingStatus = 'Загрузка дисциплин...';
+      notifyListeners();
+      
+      print('📥 Запрос текущего семестра с selector=current...');
+      var semesterResult = await _api.getCurrentSemester();
+      
+      if (semesterResult['success'] == true) {
+        final semesterData = semesterResult['data'];
+        final recordBooks = semesterData['RecordBooks'] as List? ?? [];
+        
+        print('📚 Текущий семестр: ${semesterData['Year']} период ${semesterData['Period']}');
+        print('📚 RecordBooks: ${recordBooks.length} шт.');
+        
+        if (recordBooks.isEmpty) {
+          print('⚠️ Текущий семестр пустой, пробуем 2024 - 2025 период 1...');
+          semesterResult = await _api.getStudentSemester('2024-2025', 1);
+        }
+      } else {
+        print('⚠️ Ошибка getCurrentSemester, пробуем 2024-2025 период 1...');
+        semesterResult = await _api.getStudentSemester('2024-2025', 1);
+      }
+      
+      print('📦 Semester success: ${semesterResult['success']}');
+      
+      if (semesterResult['success'] == true) {
+        print('📦 ПОЛНЫЙ JSON Semester:');
+        print(const JsonEncoder.withIndent('  ').convert(semesterResult['data']));
+        
+        final semesterData = semesterResult['data'];
+        _disciplines = [];
+        
+        final recordBooks = semesterData['RecordBooks'] as List? ?? [];
+        print('📚 RecordBooks: ${recordBooks.length} шт.');
+        
+        if (recordBooks.isNotEmpty) {
+          final firstBook = recordBooks[0];
+          print('📗 Первая зачётка: ${firstBook.keys}');
+          
+          final faculty = firstBook['Faculty'] ?? '';
+          print('🏛️ Факультет: $faculty');
+          
+          if (_student != null) {
+            _student = Student(
+              name: _student!.name,
+              group: '',
+              faculty: faculty,
+              photoUrl: _student!.photoUrl,
+            );
+          }
+          
+          final disciplinesList = firstBook['Disciplines'] as List? ?? [];
+          print('📖 Дисциплин в зачётке: ${disciplinesList.length}');
+          
+          // Обрабатываем только первую дисциплину для теста
+          if (disciplinesList.isNotEmpty) {
+            final disc = disciplinesList[0];
+            final disciplineId = disc['Id'] ?? 0;
+            final disciplineName = disc['Title'] ?? 'Дисциплина';
+            
+            print('\n🧪 === ТЕСТ API v1 и v2 для первой дисциплины ===');
+            print('Дисциплина: $disciplineName (ID: $disciplineId)');
+            
+            // Тест v2
+            print('\n📥 Тестируем v2/StudentRatingPlan...');
+            final ratingV2 = await _api.getStudentRatingPlan(disciplineId);
+            if (ratingV2['success'] == true) {
+              print('✅ v2 SUCCESS! JSON:');
+              print(const JsonEncoder.withIndent('  ').convert(ratingV2['data']));
+            } else {
+              print('❌ v2 FAILED: ${ratingV2['error']}');
+            }
+            
+            // Тест v1
+            print('\n📥 Тестируем v1/StudentRatingPlan...');
+            final ratingV1 = await _api.getStudentRatingPlanV1(disciplineId);
+            if (ratingV1['success'] == true) {
+              print('✅ v1 SUCCESS! JSON:');
+              print(const JsonEncoder.withIndent('  ').convert(ratingV1['data']));
+            } else {
+              print('❌ v1 FAILED: ${ratingV1['error']}');
+            }
+            
+            print('🧪 === КОНЕЦ ТЕСТА ===\n');
+          }
+          
+          // Теперь загружаем ВСЕ дисциплины
+          for (var disc in disciplinesList) {
+            final disciplineId = disc['Id'] ?? 0;
+            final disciplineName = disc['Title'] ?? 'Дисциплина';
+            
+            int currentScore = 0;
+            int totalScore = 100;
+            
+            if (disciplineId > 0) {
+              final ratingResult = await _api.getStudentRatingPlan(disciplineId);
+              if (ratingResult['success'] == true) {
+                final ratingData = ratingResult['data'];
+                final controlPoints = ratingData['ControlPoints'] as List? ?? [];
+                for (var cp in controlPoints) {
+                  final grade = cp['Grade'];
+                  if (grade != null) {
+                    currentScore += (grade['Ball'] ?? 0) as int;
+                  }
+                }
+              }
+            }
+            
+            _disciplines.add(Discipline(
+              id: disciplineId,
+              name: disciplineName,
+              teacher: '',
+              totalScore: totalScore,
+              currentScore: currentScore,
+            ));
+          }
+          print('✅ Загружено дисциплин: ${_disciplines.length}');
+        } else {
+          print('⚠️ RecordBooks пустой массив!');
+        }
+        notifyListeners();
+      }
+
+      // 3. Расписание
+      _loadingStatus = 'Загрузка расписания...';
+      notifyListeners();
+      await _loadTimetable();
+
+      _isLoading = false;
+      notifyListeners();
+    } catch (e, stack) {
+      print('❌ ОШИБКА: $e');
+      print('Stack: $stack');
+      _isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _loadTimetable() async {
+    // Загружаем расписание на 4 недели
+    final startDate = DateTime(2026, 2, 10);
+    final endDate = startDate.add(const Duration(days: 28));
+    
+    print('📅 Загружаем расписание с ${startDate.day}.${startDate.month} (4 недели = 28 дней)...');
+    
+    for (var date = startDate; date.isBefore(endDate); date = date.add(const Duration(days: 1))) {
+      final dateStr = '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+      print('📥 Запрос расписания на $dateStr...');
+      
+      final result = await _api.getStudentTimeTable(dateStr);
+      if (result['success'] == true) {
+        final lessons = result['data'] as List? ?? [];
+        if (lessons.isEmpty) {
+          print('⚪ ${date.day}.${date.month}: выходной');
+        } else {
+          print('✅ ${date.day}.${date.month}: ${lessons.length} пар');
+          final key = DateTime(date.year, date.month, date.day);
+          _timetable[key] = lessons.map((l) => Lesson(
+            time: '${l['PairTimeBegin'] ?? ''} - ${l['PairTimeEnd'] ?? ''}',
+            name: l['DisciplineTitle'] ?? '',
+            teacher: l['Teachers']?.map((t) => t['FIO'] ?? '').join(', ') ?? '',
+            room: l['Auditory'] ?? '',
+            type: l['LessonType'] ?? '',
+          )).toList();
+        }
+      }
+    }
+    
+    print('📊 Всего загружено дней с расписанием: ${_timetable.length}');
+  }
+
+  void changeDate(DateTime date) {
+    _selectedDate = date;
+    notifyListeners();
+    
+    final key = DateTime(date.year, date.month, date.day);
+    if (!_timetable.containsKey(key)) {
+      final dateStr = '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+      print('📥 Подгружаем расписание на $dateStr...');
+      _api.getStudentTimeTable(dateStr).then((result) {
+        if (result['success'] == true) {
+          final lessons = result['data'] as List? ?? [];
+          if (lessons.isEmpty) {
+            print('⚪ ${date.day}.${date.month}: выходной');
+          } else {
+            print('✅ Подгружено ${date.day}.${date.month}: ${lessons.length} пар');
+            _timetable[key] = lessons.map((l) => Lesson(
+              time: '${l['PairTimeBegin'] ?? ''} - ${l['PairTimeEnd'] ?? ''}',
+              name: l['DisciplineTitle'] ?? '',
+              teacher: l['Teachers']?.map((t) => t['FIO'] ?? '').join(', ') ?? '',
+              room: l['Auditory'] ?? '',
+              type: l['LessonType'] ?? '',
+            )).toList();
+          }
+          notifyListeners();
+        }
+      });
+    }
+  }
+
+  void changeSubgroup(int subgroup) {
+    _selectedSubgroup = subgroup;
+    notifyListeners();
+  }
+
+  Future<void> refreshData() async {
+    await loadStudentData();
+  }
+}

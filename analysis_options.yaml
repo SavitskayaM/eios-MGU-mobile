@@ -1,0 +1,10 @@
+analyzer:
+  errors:
+    unused_import: warning
+    avoid_print: ignore
+  
+linter:
+  rules:
+    - avoid_print: false
+    - prefer_const_constructors: true
+    - prefer_const_literals_to_create_immutables: true
